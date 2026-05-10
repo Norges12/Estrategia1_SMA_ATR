@@ -1,0 +1,10 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+ms_token_cache.json
+*.log
+.DS_Store
+.idea/
+.vscode/
