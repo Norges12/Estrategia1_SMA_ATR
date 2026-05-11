@@ -375,6 +375,27 @@ async def cmd_tablas_xls(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Tablas en el Excel:\n" + "\n".join(f"  - {n}" for n in names))
 
 
+async def cmd_cabeceras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra los primeros 10 encabezados (raw) de una tabla."""
+    if not is_authorized(update): await deny(update); return
+    args = list(context.args or [])
+    if not args or args[0].lower() not in COMMAND_TO_TABLE:
+        await update.message.reply_text(
+            "Uso: /cabeceras <comando>\n" + tables_summary()); return
+    cmd = args[0].lower()
+    table = COMMAND_TO_TABLE[cmd]
+    try:
+        headers = graph.get_header_values(table, refresh=True)
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}"); return
+    sample = headers[:10]
+    lines = [f"Encabezados de {table} (primeros 10):"]
+    for i, h in enumerate(sample):
+        lines.append(f"  [{i}] tipo={type(h).__name__}  valor={h!r}")
+    lines.append(f"Total columnas: {len(headers)}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_login(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update): await deny(update); return
     await update.message.reply_text("Mira la consola del PC.")
@@ -487,6 +508,7 @@ def main() -> None:
     app.add_handler(CommandHandler("tablas", cmd_tablas))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("tablasxls", cmd_tablas_xls))
+    app.add_handler(CommandHandler("cabeceras", cmd_cabeceras))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("poner", cmd_poner))
     app.add_handler(CommandHandler("ver", cmd_ver))
