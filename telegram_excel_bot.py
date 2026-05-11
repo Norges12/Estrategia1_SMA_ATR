@@ -131,13 +131,16 @@ class GraphClient:
             raise RuntimeError(f"Graph children {r.status_code}: {r.text}")
         return r.json().get("value", [])
 
-    def list_tables(self) -> list[str]:
+    def list_tables_full(self) -> list[dict[str, Any]]:
         path = quote(EXCEL_FILE_PATH, safe="/")
         url = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables"
         r = requests.get(url, headers=self._hdrs(), timeout=30)
         if r.status_code >= 400:
             raise RuntimeError(f"Graph listTables {r.status_code}: {r.text}")
-        return [t.get("name") for t in r.json().get("value", [])]
+        return r.json().get("value", [])
+
+    def list_tables(self) -> list[str]:
+        return [t.get("name") for t in self.list_tables_full()]
 
     def get_header_values(self, table: str, refresh: bool = False) -> list[Any]:
         if not refresh and table in self._header_cache:
@@ -168,6 +171,13 @@ class GraphClient:
 
 
 graph: GraphClient
+# Mapeo nombre-en-env -> id-real-de-Graph (resuelto al arrancar)
+TABLE_NAME_TO_ID: dict[str, str] = {}
+
+
+def resolve_table_ref(name_from_env: str) -> str:
+    """Devuelve el id real (o el nombre si no se resolvió)."""
+    return TABLE_NAME_TO_ID.get(name_from_env, name_from_env)
 
 
 # ---------- Helpers ----------
@@ -273,7 +283,7 @@ def _coerce_current(v: Any) -> float | None:
 def write_value(cmd: str, target_date: date, value: float, mode: str
                 ) -> tuple[float | None, float]:
     """mode = 'sum' | 'replace'. Devuelve (valor_anterior, valor_nuevo)."""
-    table = COMMAND_TO_TABLE[cmd]
+    table = resolve_table_ref(COMMAND_TO_TABLE[cmd])
     headers = graph.get_header_values(table)
     idx = find_col_index_for_date(headers, target_date)
     if idx < 0:
@@ -304,7 +314,7 @@ def write_value(cmd: str, target_date: date, value: float, mode: str
 
 
 def read_value(cmd: str, target_date: date) -> tuple[int, Any]:
-    table = COMMAND_TO_TABLE[cmd]
+    table = resolve_table_ref(COMMAND_TO_TABLE[cmd])
     headers = graph.get_header_values(table)
     idx = find_col_index_for_date(headers, target_date)
     if idx < 0:
@@ -383,7 +393,7 @@ async def cmd_cabeceras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(
             "Uso: /cabeceras <comando>\n" + tables_summary()); return
     cmd = args[0].lower()
-    table = COMMAND_TO_TABLE[cmd]
+    table = resolve_table_ref(COMMAND_TO_TABLE[cmd])
     try:
         headers = graph.get_header_values(table, refresh=True)
     except Exception as e:
@@ -501,6 +511,33 @@ def main() -> None:
     graph.acquire_token()
     log.info("Archivo: %s", EXCEL_FILE_PATH)
     log.info("Comandos: %s", COMMAND_TO_TABLE)
+
+    # Resolver nombres -> ids reales de Graph
+    try:
+        tables_meta = graph.list_tables_full()
+        log.info("Tablas detectadas en el archivo (%d):", len(tables_meta))
+        for t in tables_meta:
+            name = t.get("name")
+            tid = t.get("id")
+            log.info("  name=%r  id=%r", name, tid)
+        # Match por nombre exacto, luego por strip/case-insensitive
+        env_names = set(COMMAND_TO_TABLE.values())
+        for t in tables_meta:
+            n = t.get("name") or ""
+            tid = t.get("id") or ""
+            for env_name in env_names:
+                if env_name == n:
+                    TABLE_NAME_TO_ID[env_name] = tid
+                    break
+                if env_name.strip().lower() == n.strip().lower():
+                    TABLE_NAME_TO_ID[env_name] = tid
+                    break
+        for env_name in env_names:
+            if env_name not in TABLE_NAME_TO_ID:
+                log.warning("Tabla '%s' del .env NO esta en el Excel", env_name)
+        log.info("Mapeo resuelto: %s", TABLE_NAME_TO_ID)
+    except Exception as e:
+        log.warning("No pude listar tablas al inicio: %s", e)
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
