@@ -118,8 +118,10 @@ class GraphClient:
 
     def _table_url(self, table: str) -> str:
         path = quote(EXCEL_FILE_PATH, safe="/")
-        tbl = quote(table, safe="")
-        return f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables/{tbl}"
+        # OData function syntax: tables('name') con comillas simples escapadas
+        tbl_escaped = table.replace("'", "''")
+        tbl_enc = quote(tbl_escaped, safe="'-_,{}.")
+        return f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables('{tbl_enc}')"
 
     def list_children(self, folder: str = "") -> list[dict[str, Any]]:
         if folder:
@@ -173,6 +175,8 @@ class GraphClient:
 graph: GraphClient
 # Mapeo nombre-en-env -> id-real-de-Graph (resuelto al arrancar)
 TABLE_NAME_TO_ID: dict[str, str] = {}
+# user_id -> comando pendiente (esperando valor en el siguiente mensaje)
+pending_cmd_by_user: dict[int, str] = {}
 
 
 def resolve_table_ref(name_from_env: str) -> str:
@@ -385,6 +389,36 @@ async def cmd_tablas_xls(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Tablas en el Excel:\n" + "\n".join(f"  - {n}" for n in names))
 
 
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prueba varios formatos de URL contra Tabla1 para diagnostico."""
+    if not is_authorized(update): await deny(update); return
+    args = list(context.args or [])
+    name = args[0] if args else COMMAND_TO_TABLE.get(COMMAND_ORDER[0], "Tabla1")
+    tid = TABLE_NAME_TO_ID.get(name, name)
+    path = quote(EXCEL_FILE_PATH, safe="/")
+    base = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook"
+    candidates = [
+        ("rest-name",   f"{base}/tables/{quote(name, safe='')}/headerRowRange"),
+        ("odata-name",  f"{base}/tables('{quote(name, safe=chr(39))}')/headerRowRange"),
+        ("rest-id",     f"{base}/tables/{quote(tid, safe='')}/headerRowRange"),
+        ("odata-id",    f"{base}/tables('{quote(tid, safe=chr(39))}')/headerRowRange"),
+        ("by-index-0",  f"{base}/tables/itemAt(index=0)/headerRowRange"),
+    ]
+    lines = [f"Probando contra '{name}' (id={tid}):"]
+    hdrs = graph._hdrs()
+    for label, url in candidates:
+        try:
+            r = requests.get(url, headers=hdrs, timeout=20)
+            ok = r.status_code < 400
+            lines.append(f"  [{label}] {'OK' if ok else 'FAIL'} {r.status_code}")
+            if not ok:
+                snippet = r.text[:120].replace("\n", " ")
+                lines.append(f"     {snippet}")
+        except Exception as e:
+            lines.append(f"  [{label}] EXC {e}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_cabeceras(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Muestra los primeros 10 encabezados (raw) de una tabla."""
     if not is_authorized(update): await deny(update); return
@@ -419,23 +453,48 @@ async def cmd_login(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 def make_table_handler(cmd: str):
     async def _h(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not is_authorized(update): await deny(update); return
-        target, value = parse_args(list(context.args or []))
+        uid = update.effective_user.id
+        args = list(context.args or [])
+        if not args:
+            pending_cmd_by_user[uid] = cmd
+            table = COMMAND_TO_TABLE[cmd]
+            await update.message.reply_text(
+                f"OK /{cmd} ({table}). Envia el numero ahora.\n"
+                f"Ej:  100   o   98,03   (suma al dia de hoy)\n"
+                f"     11/05 50          (suma a otro dia)\n"
+                f"Cancela con /cancelar.")
+            return
+        target, value = parse_args(args)
         if value is None:
             await update.message.reply_text(
-                f"Uso: /{cmd} [fecha opcional] valor\n"
-                f"Ej: /{cmd} 169   o   /{cmd} 11/05 98,03"); return
-        try:
-            old, new = write_value(cmd, target, value, mode="sum")
-        except Exception as e:
-            log.exception("write")
-            await update.message.reply_text(f"Error: {e}"); return
-        old_txt = f"{old}" if old is not None else "(vacío)"
-        await update.message.reply_text(
-            f"OK /{cmd} {target.strftime('%d/%m/%Y')}\n"
-            f"  anterior: {old_txt}\n"
-            f"  +{value}\n"
-            f"  nuevo: {new}")
+                f"No detecte un numero. Probá:\n/{cmd} 100"); return
+        await _do_write(update, cmd, target, value)
     return _h
+
+
+async def _do_write(update: Update, cmd: str, target: date, value: float) -> None:
+    try:
+        old, new = write_value(cmd, target, value, mode="sum")
+    except Exception as e:
+        log.exception("write")
+        await update.message.reply_text(f"Error: {e}"); return
+    old_txt = f"{old}" if old is not None else "(vacio)"
+    table = COMMAND_TO_TABLE[cmd]
+    await update.message.reply_text(
+        f"OK /{cmd} ({table}) {target.strftime('%d/%m/%Y')}\n"
+        f"  anterior: {old_txt}\n"
+        f"  +{value}\n"
+        f"  nuevo: {new}")
+
+
+async def cmd_cancelar(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_authorized(update): await deny(update); return
+    uid = update.effective_user.id
+    if uid in pending_cmd_by_user:
+        cmd = pending_cmd_by_user.pop(uid)
+        await update.message.reply_text(f"Cancelado /{cmd}.")
+    else:
+        await update.message.reply_text("Nada pendiente.")
 
 
 async def cmd_poner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -484,8 +543,20 @@ async def cmd_ver(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update): await deny(update); return
     if not update.message or not update.message.text: return
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+    cmd = pending_cmd_by_user.get(uid)
+    if cmd:
+        # Hay un comando esperando valor
+        target, value = parse_args(text.split())
+        if value is None:
+            await update.message.reply_text(
+                f"No detecte un numero para /{cmd}. Reenvialo o /cancelar."); return
+        pending_cmd_by_user.pop(uid, None)
+        await _do_write(update, cmd, target, value)
+        return
     await update.message.reply_text(
-        "Usá uno de los comandos:\n" + tables_summary())
+        "Tocá uno de los comandos y despues envia el numero:\n" + tables_summary())
 
 
 async def on_error(_u: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -546,6 +617,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("tablasxls", cmd_tablas_xls))
     app.add_handler(CommandHandler("cabeceras", cmd_cabeceras))
+    app.add_handler(CommandHandler("test", cmd_test))
+    app.add_handler(CommandHandler("cancelar", cmd_cancelar))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("poner", cmd_poner))
     app.add_handler(CommandHandler("ver", cmd_ver))
