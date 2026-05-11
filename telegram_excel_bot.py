@@ -29,6 +29,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import msal
 import requests
@@ -116,7 +117,27 @@ class GraphClient:
                 "Content-Type": "application/json", "Accept": "application/json"}
 
     def _table_url(self, table: str) -> str:
-        return f"{GRAPH_BASE}/me/drive/root:/{EXCEL_FILE_PATH}:/workbook/tables/{table}"
+        path = quote(EXCEL_FILE_PATH, safe="/")
+        tbl = quote(table, safe="")
+        return f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables/{tbl}"
+
+    def list_children(self, folder: str = "") -> list[dict[str, Any]]:
+        if folder:
+            url = f"{GRAPH_BASE}/me/drive/root:/{quote(folder, safe='/')}:/children"
+        else:
+            url = f"{GRAPH_BASE}/me/drive/root/children"
+        r = requests.get(url, headers=self._hdrs(), timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph children {r.status_code}: {r.text}")
+        return r.json().get("value", [])
+
+    def list_tables(self) -> list[str]:
+        path = quote(EXCEL_FILE_PATH, safe="/")
+        url = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables"
+        r = requests.get(url, headers=self._hdrs(), timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph listTables {r.status_code}: {r.text}")
+        return [t.get("name") for t in r.json().get("value", [])]
 
     def get_header_values(self, table: str, refresh: bool = False) -> list[Any]:
         if not refresh and table in self._header_cache:
@@ -322,6 +343,38 @@ async def cmd_tablas(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Tablas:\n" + tables_summary())
 
 
+async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista archivos/carpetas de OneDrive para ubicar el archivo real."""
+    if not is_authorized(update): await deny(update); return
+    args = list(context.args or [])
+    folder = " ".join(args) if args else ""
+    try:
+        items = graph.list_children(folder)
+    except Exception as e:
+        await update.message.reply_text(f"Error listando '{folder}': {e}"); return
+    if not items:
+        await update.message.reply_text(f"'{folder or '(raiz)'}' esta vacio."); return
+    lines = [f"Contenido de '{folder or '(raiz)'}':"]
+    for it in items[:50]:
+        kind = "[DIR]" if "folder" in it else "[xlsx]" if it.get("name", "").endswith(".xlsx") else "     "
+        lines.append(f"  {kind} {it.get('name')}")
+    lines.append("\nUso: /diag <carpeta>   ej: /diag Documents")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_tablas_xls(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista las tablas reales del archivo Excel configurado."""
+    if not is_authorized(update): await deny(update); return
+    try:
+        names = graph.list_tables()
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}"); return
+    if not names:
+        await update.message.reply_text("El archivo no tiene Tablas (Ctrl+T).")
+        return
+    await update.message.reply_text("Tablas en el Excel:\n" + "\n".join(f"  - {n}" for n in names))
+
+
 async def cmd_login(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update): await deny(update); return
     await update.message.reply_text("Mira la consola del PC.")
@@ -432,6 +485,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("tablas", cmd_tablas))
+    app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("tablasxls", cmd_tablas_xls))
     app.add_handler(CommandHandler("login", cmd_login))
     app.add_handler(CommandHandler("poner", cmd_poner))
     app.add_handler(CommandHandler("ver", cmd_ver))
