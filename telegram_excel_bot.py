@@ -87,6 +87,7 @@ class GraphClient:
         self.app = msal.PublicClientApplication(
             client_id, authority=self.authority, token_cache=self.cache)
         self._header_cache: dict[str, list[Any]] = {}
+        self._item_id: str | None = None
 
     def _save_cache(self) -> None:
         if self.cache.has_state_changed:
@@ -116,12 +117,24 @@ class GraphClient:
         return {"Authorization": f"Bearer {self.acquire_token()}",
                 "Content-Type": "application/json", "Accept": "application/json"}
 
-    def _table_url(self, table: str) -> str:
+    def get_item_id(self) -> str:
+        if self._item_id:
+            return self._item_id
         path = quote(EXCEL_FILE_PATH, safe="/")
-        # OData function syntax: tables('name') con comillas simples escapadas
+        url = f"{GRAPH_BASE}/me/drive/root:/{path}"
+        r = requests.get(url, headers=self._hdrs(), timeout=30)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Graph getItem {r.status_code}: {r.text}")
+        self._item_id = r.json().get("id")
+        return self._item_id
+
+    def _workbook_url(self) -> str:
+        return f"{GRAPH_BASE}/me/drive/items/{self.get_item_id()}/workbook"
+
+    def _table_url(self, table: str) -> str:
         tbl_escaped = table.replace("'", "''")
         tbl_enc = quote(tbl_escaped, safe="'-_,{}.")
-        return f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables('{tbl_enc}')"
+        return f"{self._workbook_url()}/tables('{tbl_enc}')"
 
     def list_children(self, folder: str = "") -> list[dict[str, Any]]:
         if folder:
@@ -134,8 +147,7 @@ class GraphClient:
         return r.json().get("value", [])
 
     def list_tables_full(self) -> list[dict[str, Any]]:
-        path = quote(EXCEL_FILE_PATH, safe="/")
-        url = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook/tables"
+        url = f"{self._workbook_url()}/tables"
         r = requests.get(url, headers=self._hdrs(), timeout=30)
         if r.status_code >= 400:
             raise RuntimeError(f"Graph listTables {r.status_code}: {r.text}")
@@ -390,21 +402,29 @@ async def cmd_tablas_xls(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prueba varios formatos de URL contra Tabla1 para diagnostico."""
+    """Prueba varios formatos de URL contra una tabla para diagnostico."""
     if not is_authorized(update): await deny(update); return
     args = list(context.args or [])
-    name = args[0] if args else COMMAND_TO_TABLE.get(COMMAND_ORDER[0], "Tabla1")
+    arg = args[0] if args else COMMAND_ORDER[0] if COMMAND_ORDER else "Tabla1"
+    # Si es comando ('paquetes'), lo traducimos a nombre de tabla ('Tabla1')
+    name = COMMAND_TO_TABLE.get(arg.lower(), arg)
     tid = TABLE_NAME_TO_ID.get(name, name)
+    try:
+        iid = graph.get_item_id()
+    except Exception as e:
+        await update.message.reply_text(f"No se pudo obtener item id: {e}"); return
+    by_id = f"{GRAPH_BASE}/me/drive/items/{iid}/workbook"
     path = quote(EXCEL_FILE_PATH, safe="/")
-    base = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook"
+    by_path = f"{GRAPH_BASE}/me/drive/root:/{path}:/workbook"
     candidates = [
-        ("rest-name",   f"{base}/tables/{quote(name, safe='')}/headerRowRange"),
-        ("odata-name",  f"{base}/tables('{quote(name, safe=chr(39))}')/headerRowRange"),
-        ("rest-id",     f"{base}/tables/{quote(tid, safe='')}/headerRowRange"),
-        ("odata-id",    f"{base}/tables('{quote(tid, safe=chr(39))}')/headerRowRange"),
-        ("by-index-0",  f"{base}/tables/itemAt(index=0)/headerRowRange"),
+        ("id+rest-name",     f"{by_id}/tables/{quote(name, safe='')}/headerRowRange"),
+        ("id+odata-name",    f"{by_id}/tables('{quote(name, safe=chr(39))}')/headerRowRange"),
+        ("id+odata-id",      f"{by_id}/tables('{quote(tid, safe=chr(39))}')/headerRowRange"),
+        ("id+by-index-0",    f"{by_id}/tables/itemAt(index=0)/headerRowRange"),
+        ("path+rest-name",   f"{by_path}/tables/{quote(name, safe='')}/headerRowRange"),
+        ("path+odata-name",  f"{by_path}/tables('{quote(name, safe=chr(39))}')/headerRowRange"),
     ]
-    lines = [f"Probando contra '{name}' (id={tid}):"]
+    lines = [f"Probando contra tabla '{name}':"]
     hdrs = graph._hdrs()
     for label, url in candidates:
         try:
@@ -412,7 +432,7 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ok = r.status_code < 400
             lines.append(f"  [{label}] {'OK' if ok else 'FAIL'} {r.status_code}")
             if not ok:
-                snippet = r.text[:120].replace("\n", " ")
+                snippet = r.text[:100].replace("\n", " ")
                 lines.append(f"     {snippet}")
         except Exception as e:
             lines.append(f"  [{label}] EXC {e}")
