@@ -34,7 +34,6 @@ import msal
 import requests
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, ContextTypes, MessageHandler, filters,
 )
@@ -233,8 +232,7 @@ def is_authorized(update: Update) -> bool:
 async def deny(update: Update) -> None:
     uid = update.effective_user.id if update.effective_user else "?"
     if update.message:
-        await update.message.reply_text(
-            f"No autorizado. Tu ID es `{uid}`.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"No autorizado. Tu ID es {uid}.")
 
 
 def tables_summary() -> str:
@@ -305,19 +303,18 @@ async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hola. Tablas configuradas:\n" + tables_summary() +
         "\n\nEjemplos:\n"
-        "  `/paquetes 169`           suma 169 al día de hoy\n"
-        "  `/gasolina 98,03`         suma 98.03 (acepta coma decimal)\n"
-        "  `/paquetes 11/05 50`      suma al 11 de mayo\n"
-        "  `/poner paquetes 200`     REEMPLAZA el valor de hoy\n"
-        "  `/ver paquetes`           muestra el valor de hoy\n"
-        "  `/ver gasolina 11/05`     muestra el valor del 11/05\n\n"
-        "Más: /tablas /id /login",
-        parse_mode=ParseMode.MARKDOWN)
+        "  /paquetes 169            suma 169 al día de hoy\n"
+        "  /gasolina 98,03          suma 98.03 (acepta coma decimal)\n"
+        "  /paquetes 11/05 50       suma al 11 de mayo\n"
+        "  /poner paquetes 200      REEMPLAZA el valor de hoy\n"
+        "  /ver paquetes            muestra el valor de hoy\n"
+        "  /ver gasolina 11/05      muestra el valor del 11/05\n\n"
+        "Más: /tablas /id /login")
 
 
 async def cmd_id(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id if update.effective_user else "?"
-    await update.message.reply_text(f"Tu user_id: `{uid}`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"Tu user_id: {uid}")
 
 
 async def cmd_tablas(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
